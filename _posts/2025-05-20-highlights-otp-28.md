@@ -406,20 +406,25 @@ based literals, you can even preserve bit level precision. For example,
 Erlang/OTP 28 introduces a warning for using the old style `catch Expr`,
 instead of `try ... catch ... end`.
 
-The more simplistic `catch Expr` has some subtle behaviors, especially
+The more simplistic `catch Expr` is problematic in that it catches
+_all_ exceptions and can therefore hide bugs. For example, if the
+intention is to catch exceptions raised by `throw/1`, the old-style
+`catch` will also catch runtime errors.
+
+has some subtle behaviors, especially
 in corner cases. Those unwanted behaviors can make debugging and maintaining
 code containing them more difficult. Using its alternative `try ... catch ... end`
 offers better clarity.
 
-To facilitate the eventual removal of the old-style catch, the compiler
-now has an option `warn_deprecated_catch`. It can be enabled on the project
-level or the module level, in order to prevent new uses of the old-style
-catch.
+In a future release, the use of the old `catch` construct will by
+default result in compiler warnings. To facilitate removing usages of
+the old-style `catch`, the compiler now has an option
+`warn_deprecated_catch`. It can be enabled on the project level or the
+module level, in order to prevent new uses of the old-style catch.
 
-On the other hand, if you need to suppress the warning for legacy code. You
-can add the compile option `-compile(nowarn_deprecated_catch).` But this
-is only a temporary solution. `catch Expr` will be completely removed in
-the future. 
+If you have added `warn_deprecated_catch` at the project-level, the
+warning can be suppressed in individual modules that have not yet been
+updated by adding the `-compile(nowarn_deprecated_catch)` to them.
 
 Here are some common uses of the old style `catch Expr`. We will show how
 to replace them with `try ... catch ... end` and briefly explain why it is
@@ -427,52 +432,90 @@ a better solution.
 
 _Example 1_: Using `catch Expr` to handle a possible `throw`
 
+`throw/1` is often used to quickly return from a deep recursion. If
+`tree_walker/1` is a function that traverses a tree and sometimes throws
+a value, it could be called like so using the old-style catch:
+
 ````
-Result = catch maybe_throw().
+Result = catch tree_walker(Tree).
 ````
 
 It can be refactored to the following code:
 
 ````
-Result = 
-    try maybe_throw() of
-        Value -> Value
+Result = try tree_walker(Tree) of
+             Value -> Value
+         catch
+             throw:Reason -> Reason
+         end.
+````
+
+So this is a bit longer, but it is also safer. For example, if caller
+of `tree_walker/1` passes in an invalid tree (such as `not_a_tree`),
+the `try` ... `catch` will not catch the resulting crash, allowing the
+bug to be noticed and fixed early.
+
+To have the same ensurance that crashes are not hidden when using the
+old-style `catch`, you would have to write:
+
+````
+Result = case catch tree_walker(Tree) of
+            {'EXIT',Error} ->
+                 error(Error);
+            Value ->
+                 Value
+         end.
+````
+
+_Example 2_: Using `catch Expr` to match a specific error in a test case
+
+
+````
+test_bad_argument(Term) ->
+    {'EXIT',{badarg,_}} = catch list_to_atom(Term).
+````
+
+It could be refactored to the following code:
+
+````
+test_bad_argument(Term) ->
+    try list_to_atom(Term) of
+        _Value -> error(not_supposed_to_succeed)
     catch
-        throw:Reason -> {throw, Reason}
+        error:badarg -> ok
     end.
 ````
 
-Using `try ... catch ... end` is better because you know exactly what kind
-of exception happened. You can handle it accordingly.
-
-_Example 2_: Using `catch Expr` to match a specific error
+An easier way is to include the following header file:
 
 ````
-{'EXIT',{badarg,_}} = (catch list_to_existing_atom(String))
+-include_lib("stdlib/include/assert.hrl").
 ````
 
-It can be refactored to the following code:
+With that in place, you can simply write:
 
 ````
-try list_to_existing_atom(String) of
-    _Value -> should_not_happen
-catch
-    error:badarg -> ok
-end.
+test_bad_argument(Term) ->
+    ?assertError(badarg, list_to_atom(Term)).
 ````
 
-Now the error case behavior does not change. You have more information for
-debugging purpose if needed.
+That will also result in more information being given if the test case
+fails:
 
-Even though in both cases the old `catch Expr` result in shorter code, the
-omission of stack trace can cause more debugging problems in the long run.
-In addition, `catch Expr` does not benefit from compiler optimizations
-for `try/catch`. Shorter code may not result in better performance, in this
-case.
+````
+1> t:test_bad_argument("ok").
+** exception error: {assertException,[{module,t},
+                                      {line,6},
+                                      {expression,"list_to_atom ( Term )"},
+                                      {pattern,"{ error , badarg , [...] }"},
+                                      {unexpected_success,ok}]}
+     in function  t:test_bad_argument/1 (t.erl:6)
+````
 
-The old-style catch will be completely removed in Erlang/OTP 29 or 30. If
-you are still using the old style `catch Expr` in your code, now is a good
-time to start refactoring.
+It is likely that the compiler will start generate warnings for the
+old-style `catch` in Erlang/OTP 29 or 30. If you are still using the
+old style `catch Expr` in your code, now is a good time to start
+refactoring.
 
 # Smarter Error Suggestions
 
